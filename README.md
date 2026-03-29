@@ -1,25 +1,170 @@
-# Fin-Instruct
+# Finly
 
-An LLM fine-tuned specifically to ingest dense financial texts to output highly structured, beginner-friendly insights focusing on long-term growth and hold strategies for stocks & investments.
+Finly is a domain-adapted large language model project focused on long-term value investing analysis. The goal is to fine-tune an instruction model on dense financial source material so it can turn raw filings, market coverage, and business commentary into structured, beginner-friendly investment insights.
 
-## Quickstart (Dataset + Synthetic Gold Standard)
+The project is designed around an industry-style workflow:
 
-1. Create raw text snippets:
-   - Place `.txt` files into `inputs/` (e.g. `inputs/earnings_q4_2025.txt`).
-   - Each file should have a single raw financial text sample (10-K/10-Q MD&A, earnings call excerpt, etc.).
+- curate real-world financial text from reputable sources
+- generate grounded "teacher" responses with a stronger LLM
+- fine-tune a smaller open-weight model with LoRA/QLoRA
+- later serve the model in a retrieval-augmented application for practical equity research
 
-2. Build curated dataset JSONL:
-   - `python scripts/curate_dataset.py --input-dir inputs --output-jsonl data/curated_dataset.jsonl`
+## Project Objective
 
-3. Generate synthetic teacher outputs (OpenAI):
-   - Ensure `OPENAI_API_KEY` is set in your environment.
-   - `python scripts/generate_gold_standard.py --input-jsonl data/curated_dataset.jsonl --output-jsonl data/curated_dataset_annotated.jsonl --model gpt-4.1`
+Most retail investors can access financial information, but not necessarily interpret it. Fin-Instruct aims to reduce that gap by training a model to convert dense business and market text into a consistent framework:
 
-4. Validate samples:
-   - Check `data/curated_dataset_annotated.jsonl` for 4 required sections in `response`.
-   - Spot-check 50+ examples for grounding/hallucination.
+- Plain English Summary
+- Long-Term Bull Case
+- Long-Term Bear Case
+- Hold/Wait Analysis
 
-5. Next steps:
-   - Train QLoRA with `trl`/`bitsandbytes` using annotated dataset.
-   - Build RAG pipeline with LangChain + finance APIs.
-   - Deploy with FastAPI/Streamlit and Hugging Face Spaces.
+This structure is intended to make company research more accessible without flattening the nuance of the original source material.
+
+## Current Pipeline
+
+The repository currently covers the first two stages of the training workflow.
+
+### 1. Dataset Curation
+
+The dataset builder supports multiple ingestion paths so training data does not depend solely on manually prepared files.
+
+Supported inputs:
+
+- local `.txt` documents
+- RSS feeds from financial/news publishers
+- article URLs listed in a text file
+
+The curation script normalizes all raw inputs into a training-ready JSONL schema with:
+
+- shared instruction text
+- source context
+- empty response field for later annotation
+- metadata for source tracking and quality control
+
+### 2. Gold-Standard Annotation
+
+The annotation pipeline is designed to pass curated raw contexts into a stronger LLM, which generates structured target responses for supervised fine-tuning. This creates a synthetic teacher-student workflow while still grounding the inputs in real source material.
+
+### 3. LoRA / QLoRA Training
+
+The training script has been refactored for a Linux + NVIDIA workflow and is intended to run on a CUDA-enabled machine such as an RTX 3060 environment.
+
+## Repository Structure
+
+```text
+.
+├── scripts/
+│   ├── curate_dataset.py
+│   ├── generate_gold_standard.py
+│   └── train_qlora.py
+└── README.md
+```
+
+## Data Schema
+
+The curation step produces JSONL rows in the following format:
+
+```json
+{
+  "instruction": "Analyze the long-term growth prospects of this company based on the text context.",
+  "context": "Raw financial source text...",
+  "response": "",
+  "metadata": {
+    "id": "sample-id",
+    "source": "https://example.com/article",
+    "title": "Article title",
+    "source_type": "article_url"
+  }
+}
+```
+
+After annotation, the `response` field contains the teacher model output used for supervised fine-tuning.
+
+## Usage
+
+### 1. Curate Dataset From Local Text
+
+```bash
+python scripts/curate_dataset.py --input-dir inputs --output-jsonl data/curated_dataset.jsonl
+```
+
+### 2. Curate Dataset From RSS Feeds
+
+```bash
+python scripts/curate_dataset.py \
+  --feed-url "https://example.com/feed.xml" \
+  --feed-item-limit 20 \
+  --output-jsonl data/curated_dataset.jsonl
+```
+
+### 3. Curate Dataset From Article URLs
+
+Create a file such as `config/article_urls.txt` with one URL per line, then run:
+
+```bash
+python scripts/curate_dataset.py \
+  --url-file config/article_urls.txt \
+  --output-jsonl data/curated_dataset.jsonl
+```
+
+### 4. Mix Multiple Source Types
+
+```bash
+python scripts/curate_dataset.py \
+  --input-dir inputs \
+  --feed-url "https://example.com/feed.xml" \
+  --url-file config/article_urls.txt \
+  --output-jsonl data/curated_dataset.jsonl
+```
+
+### 5. Generate Gold-Standard Outputs
+
+```bash
+python scripts/generate_gold_standard.py \
+  --input-jsonl data/curated_dataset.jsonl \
+  --output-jsonl data/curated_dataset_annotated.jsonl \
+  --model gpt-4.1
+```
+
+### 6. Train LoRA Adapter
+
+```bash
+python scripts/train_qlora.py \
+  --dataset-path data/curated_dataset_annotated.jsonl \
+  --output-dir artifacts/finly-lora
+```
+
+## Current Implementation Notes
+
+- `scripts/curate_dataset.py` supports online ingestion and local fallback input.
+- `scripts/generate_gold_standard.py` is present and functional, but still due for modernization and stronger fault tolerance.
+- `scripts/train_qlora.py` is aligned to a Linux + NVIDIA training path instead of DirectML.
+- The project is currently in the dataset and training-foundation stage, not yet deployment-ready.
+
+## Quality Standards
+
+The value of this project depends more on data quality than raw model size. Before training, curated examples should be reviewed for:
+
+- grounding to the source text
+- consistent section structure
+- limited hallucination of figures or claims
+- manageable context length for fine-tuning hardware limits
+
+Manual spot-checking of randomly sampled records is a required part of the workflow.
+
+## Roadmap
+
+- modernize the gold-standard generation script and improve retry/resume behavior
+- add source-specific collectors for high-value financial datasets
+- introduce train/validation splitting and lightweight evaluation
+- package the resulting adapter for downstream inference
+- add RAG-based retrieval with current market context
+- build a deployable demo interface
+
+## Environment Direction
+
+The intended training environment is Linux with NVIDIA CUDA support.
+
+## Security Note
+
+For other contributors or anyone that wants to use this repo, do not commit live API credentials into the repository. Store secrets in environment variables or local-only configuration and rotate any exposed keys immediately.

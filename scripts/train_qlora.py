@@ -1,107 +1,175 @@
-import os
+import argparse
+from pathlib import Path
+
 import torch
-import torch_directml
+from datasets import load_dataset
+from peft import LoraConfig
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,  # Note: bitsandbytes may not work with DirectML; using as fallback
+    BitsAndBytesConfig,
     TrainingArguments,
 )
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer
-from datasets import load_dataset
 
-# DirectML device setup
-device = torch_directml.device()
-print(f"Using DirectML device: {device}")
 
-def load_model_and_tokenizer(model_name="mistralai/Mistral-7B-Instruct-v0.2"):
-    # Note: bitsandbytes quantization may not be compatible with DirectML
-    # Using 8-bit or half precision instead
-    try:
-        # Try 8-bit config (may not work with DirectML)
-        quantization_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-            llm_int8_threshold=6.0,
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            quantization_config=quantization_config,
-            device_map="auto",  # Let transformers handle device placement
-        )
-    except Exception as e:
-        print(f"8-bit quantization failed: {e}. Falling back to half precision.")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16,
-            device_map={"": device},  # Explicitly place on DirectML device
-        )
+DEFAULT_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+DEFAULT_DATASET = "data/curated_dataset_annotated.jsonl"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+def detect_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
+def load_model_and_tokenizer(model_name: str, use_4bit: bool):
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    model_kwargs = {
+        "trust_remote_code": False,
+    }
+
+    if torch.cuda.is_available():
+        model_kwargs["device_map"] = "auto"
+
+        if use_4bit:
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+            )
+        else:
+            model_kwargs["torch_dtype"] = torch.float16
+    else:
+        model_kwargs["torch_dtype"] = torch.float32
+
+    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+    model.config.use_cache = False
     return model, tokenizer
 
-def setup_lora(model):
-    lora_config = LoraConfig(
-        r=16,  # Low-rank dimension
+
+def format_training_example(example):
+    metadata = example.get("metadata") or {}
+    source = metadata.get("source", "unknown")
+
+    prompt = (
+        "### Instruction:\n"
+        f"{example['instruction']}\n\n"
+        "### Context:\n"
+        f"{example['context']}\n\n"
+        "### Response:\n"
+        f"{example['response']}\n"
+        "### Source:\n"
+        f"{source}"
+    )
+    return {"text": prompt}
+
+
+def load_training_dataset(dataset_path: str):
+    dataset = load_dataset("json", data_files=dataset_path, split="train")
+    dataset = dataset.filter(lambda row: bool(row.get("response", "").strip()))
+    if len(dataset) == 0:
+        raise ValueError("Dataset has no annotated responses. Generate gold-standard outputs first.")
+    return dataset.map(format_training_example, remove_columns=dataset.column_names)
+
+
+def build_lora_config() -> LoraConfig:
+    return LoraConfig(
+        r=16,
         lora_alpha=32,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],  # Attention modules
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         lora_dropout=0.05,
         bias="none",
         task_type="CAUSAL_LM",
     )
-    model = prepare_model_for_kbit_training(model)
-    model = get_peft_model(model, lora_config)
-    return model
 
-def train_model(model, tokenizer, dataset_path="data/curated_dataset_annotated.jsonl"):
-    # Load dataset
-    dataset = load_dataset("json", data_files=dataset_path, split="train")
 
-    # Training arguments
-    training_args = TrainingArguments(
-        output_dir="./results",
-        num_train_epochs=3,
-        per_device_train_batch_size=1,  # Small batch for low VRAM
-        gradient_accumulation_steps=4,
-        optim="adamw_torch",
-        save_steps=500,
+def build_training_args(output_dir: str, learning_rate: float, epochs: int):
+    use_bf16 = torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8
+
+    return TrainingArguments(
+        output_dir=output_dir,
+        num_train_epochs=epochs,
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=8,
+        learning_rate=learning_rate,
         logging_steps=10,
-        learning_rate=2e-4,
-        fp16=True,  # Use mixed precision if supported
-        max_grad_norm=0.3,
+        save_strategy="epoch",
+        eval_strategy="no",
+        optim="paged_adamw_8bit" if torch.cuda.is_available() else "adamw_torch",
         warmup_ratio=0.03,
-        lr_scheduler_type="constant",
-        report_to="none",  # Disable wandb/tensorboard for simplicity
+        lr_scheduler_type="cosine",
+        max_grad_norm=0.3,
+        report_to="none",
+        fp16=torch.cuda.is_available() and not use_bf16,
+        bf16=use_bf16,
     )
 
-    # SFT Trainer
+
+def train(
+    model_name: str,
+    dataset_path: str,
+    output_dir: str,
+    learning_rate: float,
+    epochs: int,
+    max_seq_length: int,
+    use_4bit: bool,
+):
+    device = detect_device()
+    print(f"Training device: {device}")
+    print(f"Base model: {model_name}")
+    print(f"Dataset: {dataset_path}")
+
+    model, tokenizer = load_model_and_tokenizer(model_name, use_4bit=use_4bit)
+    dataset = load_training_dataset(dataset_path)
+    training_args = build_training_args(output_dir, learning_rate, epochs)
+    lora_config = build_lora_config()
+
     trainer = SFTTrainer(
         model=model,
         train_dataset=dataset,
-        peft_config=None,  # Already applied LoRA
-        dataset_text_field="context",  # Use context as input
-        max_seq_length=1024,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
+        peft_config=lora_config,
         args=training_args,
-        packing=False,
+        max_seq_length=max_seq_length,
     )
 
     trainer.train()
-    return trainer
-
-def save_model(trainer, output_dir="./fin_instruct_model"):
     trainer.model.save_pretrained(output_dir)
-    trainer.tokenizer.save_pretrained(output_dir)
-    print(f"Model saved to {output_dir}")
+    tokenizer.save_pretrained(output_dir)
+    print(f"Saved adapter and tokenizer to {output_dir}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Train a QLoRA/SFT adapter for Fin-Instruct on Linux + NVIDIA")
+    parser.add_argument("--model-name", default=DEFAULT_MODEL, help="Base Hugging Face model id")
+    parser.add_argument("--dataset-path", default=DEFAULT_DATASET, help="Annotated JSONL training dataset")
+    parser.add_argument("--output-dir", default="artifacts/finly-lora", help="Directory to save LoRA adapter files")
+    parser.add_argument("--learning-rate", type=float, default=2e-4)
+    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--max-seq-length", type=int, default=1024)
+    parser.add_argument("--no-4bit", action="store_true", help="Disable bitsandbytes 4-bit loading")
+
+    args = parser.parse_args()
+
+    dataset_path = Path(args.dataset_path)
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Dataset not found: {dataset_path}")
+
+    train(
+        model_name=args.model_name,
+        dataset_path=str(dataset_path),
+        output_dir=args.output_dir,
+        learning_rate=args.learning_rate,
+        epochs=args.epochs,
+        max_seq_length=args.max_seq_length,
+        use_4bit=not args.no_4bit,
+    )
+
 
 if __name__ == "__main__":
-    # Set environment for reproducibility
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"  # Not CUDA, but may help memory
-
-    model, tokenizer = load_model_and_tokenizer()
-    model = setup_lora(model)
-    trainer = train_model(model, tokenizer)
-    save_model(trainer)
+    main()
