@@ -48,7 +48,7 @@ The annotation pipeline sends curated raw contexts into a stronger LLM, which ge
 
 ### 3. LoRA or QLoRA Training
 
-The training script is aligned to a Linux plus NVIDIA workflow and is intended to run on a CUDA-enabled machine such as an RTX 3060 environment.
+The training script is aligned to a Linux plus NVIDIA workflow and is intended to run in a CUDA-enabled environment.
 
 ## Repository Structure
 
@@ -57,10 +57,51 @@ The training script is aligned to a Linux plus NVIDIA workflow and is intended t
 |-- scripts/
 |   |-- curate_dataset.py
 |   |-- generate_gold_standard.py
-|   `-- train_qlora.py
+|   |-- train_qlora.py
+|   `-- validate_dataset.py
+|-- .env.example
 |-- Fin-Instruct_details.txt
 |-- Finly_details.txt
+|-- requirements.txt
 `-- README.md
+```
+
+## Environment Setup
+
+The recommended training target is a Linux environment with an NVIDIA GPU.
+
+### 1. Create a Python Environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+```
+
+### 2. Install PyTorch for Your CUDA Version
+
+Install PyTorch separately so it matches the CUDA version on your target system. Example for CUDA 12.1:
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
+If your system uses a different CUDA runtime, use the matching PyTorch install command from the official PyTorch site.
+
+### 3. Install Project Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Configure Secrets
+
+Copy `.env.example` to `.env` and provide your OpenAI key through the environment or local-only configuration.
+
+On Linux:
+
+```bash
+export OPENAI_API_KEY="your_api_key_here"
 ```
 
 ## Data Schema
@@ -154,7 +195,25 @@ python scripts/generate_gold_standard.py \
   --limit 25
 ```
 
-### 7. Train LoRA Adapter
+### 7. Validate the Dataset Before Training
+
+Validate a curated dataset before annotation:
+
+```bash
+python scripts/validate_dataset.py \
+  --dataset-path data/curated_dataset.jsonl
+```
+
+Validate an annotated dataset before training:
+
+```bash
+python scripts/validate_dataset.py \
+  --dataset-path data/curated_dataset_annotated.jsonl \
+  --require-annotated \
+  --require-response-sections
+```
+
+### 8. Train LoRA Adapter
 
 ```bash
 python scripts/train_qlora.py \
@@ -162,11 +221,23 @@ python scripts/train_qlora.py \
   --output-dir artifacts/finly-lora
 ```
 
+If GPU memory is tighter than expected, try shorter sequence lengths or disable 4-bit loading temporarily for debugging:
+
+```bash
+python scripts/train_qlora.py \
+  --dataset-path data/curated_dataset_annotated.jsonl \
+  --output-dir artifacts/finly-lora \
+  --max-seq-length 768 \
+  --no-4bit
+```
+
 ## Current Implementation Notes
 
 - `scripts/curate_dataset.py` supports local text, RSS feeds, article URLs, and direct SEC filing ingestion.
 - `scripts/generate_gold_standard.py` uses the current OpenAI client flow and supports retrying plus resumable output generation.
+- `scripts/validate_dataset.py` checks dataset structure, empty responses, section headings, and rough length limits before annotation or training.
 - `scripts/train_qlora.py` is aligned to a Linux plus NVIDIA training path instead of DirectML.
+- `requirements.txt` captures the Python package dependencies, while PyTorch should be installed separately to match the CUDA environment on the target system.
 - The project is currently in the dataset and training-foundation stage, not yet deployment-ready.
 
 ## Quality Standards
@@ -190,7 +261,7 @@ Manual spot-checking of randomly sampled records is a required part of the workf
 
 ## Environment Direction
 
-The intended training environment is Linux with NVIDIA CUDA support. This repository is being prepared locally, while model fine-tuning is expected to run on a separate lab machine with an NVIDIA GPU.
+The intended training environment is Linux with NVIDIA CUDA support.
 
 ## Security Note
 
