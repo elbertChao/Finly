@@ -17,6 +17,8 @@ DEFAULT_INSTRUCTION = (
 )
 
 DEFAULT_USER_AGENT = "Fin-Instruct/0.1 (dataset research bot; educational use)"
+SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
+SEC_ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik_nolead}/{accession_nodash}/{primary_doc}"
 
 
 def fetch_url(url: str, timeout: int = 20) -> str:
@@ -30,6 +32,19 @@ def fetch_url(url: str, timeout: int = 20) -> str:
     with urlopen(request, timeout=timeout) as response:
         charset = response.headers.get_content_charset() or "utf-8"
         return response.read().decode(charset, errors="ignore")
+
+
+def fetch_json(url: str, timeout: int = 20, user_agent: str = DEFAULT_USER_AGENT) -> dict:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": user_agent,
+            "Accept": "application/json,text/plain;q=0.9,*/*;q=0.8",
+        },
+    )
+    with urlopen(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return json.loads(response.read().decode(charset, errors="ignore"))
 
 
 def collapse_whitespace(text: str) -> str:
@@ -68,6 +83,13 @@ def extract_article_text(html: str, min_paragraph_chars: int = 120) -> str:
 
 def make_id(seed: str) -> str:
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
+
+
+def normalize_cik(cik: str) -> str:
+    digits = re.sub(r"\D", "", cik)
+    if not digits:
+        raise ValueError(f"Invalid CIK value: {cik}")
+    return digits.zfill(10)
 
 
 def build_sample(raw_text: str, source: str, title: str = "", extra_metadata: dict | None = None) -> dict | None:
@@ -167,6 +189,86 @@ def fetch_article_samples(urls: Iterable[str]) -> list[dict]:
     return samples
 
 
+def parse_sec_company_specs(values: list[str]) -> list[dict]:
+    companies = []
+    for raw in values:
+        parts = [part.strip() for part in raw.split(":", maxsplit=1)]
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise ValueError(
+                "Invalid --sec-company value. Use the format TICKER:CIK, for example AAPL:320193."
+            )
+        companies.append({"ticker": parts[0].upper(), "cik": normalize_cik(parts[1])})
+    return companies
+
+
+def build_sec_filing_url(cik: str, accession_number: str, primary_doc: str) -> str:
+    return SEC_ARCHIVES_URL.format(
+        cik_nolead=str(int(cik)),
+        accession_nodash=accession_number.replace("-", ""),
+        primary_doc=primary_doc,
+    )
+
+
+def fetch_sec_samples(
+    companies: list[dict],
+    user_agent: str,
+    forms: set[str],
+    filings_per_company: int,
+) -> list[dict]:
+    samples = []
+
+    for company in companies:
+        ticker = company["ticker"]
+        cik = company["cik"]
+        submissions_url = SEC_SUBMISSIONS_URL.format(cik=cik)
+        print(f"Fetching SEC submissions for {ticker} (CIK {cik})")
+        payload = fetch_json(submissions_url, user_agent=user_agent)
+
+        company_name = payload.get("name", ticker)
+        recent = payload.get("filings", {}).get("recent", {})
+        recent_forms = recent.get("form", [])
+        recent_accessions = recent.get("accessionNumber", [])
+        recent_primary_docs = recent.get("primaryDocument", [])
+        recent_dates = recent.get("filingDate", [])
+
+        matched = 0
+        for form, accession, primary_doc, filing_date in zip(
+            recent_forms, recent_accessions, recent_primary_docs, recent_dates
+        ):
+            if form not in forms:
+                continue
+
+            filing_url = build_sec_filing_url(cik, accession, primary_doc)
+            html = fetch_url(filing_url)
+            title = f"{company_name} {form} filed {filing_date}"
+            filing_text = extract_article_text(html, min_paragraph_chars=80)
+            if len(filing_text) < 500:
+                filing_text = strip_html(html)
+
+            sample = build_sample(
+                raw_text=filing_text,
+                source=filing_url,
+                title=title,
+                extra_metadata={
+                    "source_type": "sec_filing",
+                    "ticker": ticker,
+                    "company_name": company_name,
+                    "cik": cik,
+                    "form": form,
+                    "filing_date": filing_date,
+                    "accession_number": accession,
+                },
+            )
+            if sample:
+                samples.append(sample)
+                matched += 1
+
+            if matched >= filings_per_company:
+                break
+
+    return samples
+
+
 def dedupe_samples(samples: list[dict]) -> list[dict]:
     deduped = []
     seen = set()
@@ -215,6 +317,29 @@ def main():
     parser.add_argument("--feed-url", action="append", default=[], help="RSS feed URL to ingest; repeat for multiple feeds")
     parser.add_argument("--feed-item-limit", type=int, default=10, help="Max items to ingest per RSS feed")
     parser.add_argument("--url-file", action="append", default=[], help="Text file containing article URLs to fetch")
+    parser.add_argument(
+        "--sec-company",
+        action="append",
+        default=[],
+        help="SEC company spec in the format TICKER:CIK, for example AAPL:320193. Repeat for multiple companies.",
+    )
+    parser.add_argument(
+        "--sec-user-agent",
+        default="",
+        help="Descriptive User-Agent for SEC requests, ideally including contact information.",
+    )
+    parser.add_argument(
+        "--sec-form",
+        action="append",
+        default=["10-K", "10-Q"],
+        help="SEC filing form to include. Repeat for multiple forms.",
+    )
+    parser.add_argument(
+        "--sec-filings-per-company",
+        type=int,
+        default=2,
+        help="Maximum number of recent SEC filings to ingest per company.",
+    )
 
     args = parser.parse_args()
 
@@ -232,6 +357,21 @@ def main():
     if article_urls:
         print(f"Fetching {len(article_urls)} article URLs")
         samples.extend(fetch_article_samples(article_urls))
+
+    if args.sec_company:
+        if not args.sec_user_agent.strip():
+            raise ValueError(
+                "--sec-user-agent is required when using SEC ingestion so requests identify the project responsibly."
+            )
+        companies = parse_sec_company_specs(args.sec_company)
+        samples.extend(
+            fetch_sec_samples(
+                companies=companies,
+                user_agent=args.sec_user_agent.strip(),
+                forms=set(args.sec_form),
+                filings_per_company=args.sec_filings_per_company,
+            )
+        )
 
     samples = dedupe_samples(samples)
     if not samples:

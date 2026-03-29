@@ -1,28 +1,28 @@
 # Finly
 
-Finly is a domain-adapted large language model project focused on long-term value investing analysis. The goal is to fine-tune an instruction model on dense financial source material so it can turn raw filings, market coverage, and business commentary into structured, beginner-friendly investment insights.
+Finly is a domain-adapted large language model project focused on long-term value investing analysis. The goal is to fine-tune an instruction model on dense financial source material so it can convert raw filings, market coverage, and business commentary into structured, beginner-friendly investment insights.
 
-The project is designed around an industry-style workflow:
+The project is being built around an industry-style workflow:
 
 - curate real-world financial text from reputable sources
-- generate grounded "teacher" responses with a stronger LLM
-- fine-tune a smaller open-weight model with LoRA/QLoRA
+- generate grounded teacher responses with a stronger LLM
+- fine-tune a smaller open-weight model with LoRA or QLoRA
 - later serve the model in a retrieval-augmented application for practical equity research
 
 ## Project Objective
 
-Most retail investors can access financial information, but not necessarily interpret it. Fin-Instruct aims to reduce that gap by training a model to convert dense business and market text into a consistent framework:
+Most retail investors can access financial information, but not necessarily interpret it well. Finly aims to narrow that gap by training a model to convert dense business and market text into a consistent analytical framework:
 
 - Plain English Summary
 - Long-Term Bull Case
 - Long-Term Bear Case
 - Hold/Wait Analysis
 
-This structure is intended to make company research more accessible without flattening the nuance of the original source material.
+This structure is designed to make company research more accessible without flattening the nuance of the original source material.
 
 ## Current Pipeline
 
-The repository currently covers the first two stages of the training workflow.
+The repository currently covers the data and training-foundation stages of the workflow.
 
 ### 1. Dataset Curation
 
@@ -31,8 +31,9 @@ The dataset builder supports multiple ingestion paths so training data does not 
 Supported inputs:
 
 - local `.txt` documents
-- RSS feeds from financial/news publishers
+- RSS feeds from financial or business news publishers
 - article URLs listed in a text file
+- SEC filings fetched directly from EDGAR
 
 The curation script normalizes all raw inputs into a training-ready JSONL schema with:
 
@@ -43,21 +44,23 @@ The curation script normalizes all raw inputs into a training-ready JSONL schema
 
 ### 2. Gold-Standard Annotation
 
-The annotation pipeline is designed to pass curated raw contexts into a stronger LLM, which generates structured target responses for supervised fine-tuning. This creates a synthetic teacher-student workflow while still grounding the inputs in real source material.
+The annotation pipeline sends curated raw contexts into a stronger LLM, which generates structured target responses for supervised fine-tuning. This creates a teacher-student workflow while keeping inputs grounded in real financial source material.
 
-### 3. LoRA / QLoRA Training
+### 3. LoRA or QLoRA Training
 
-The training script has been refactored for a Linux + NVIDIA workflow and is intended to run on a CUDA-enabled machine such as an RTX 3060 environment.
+The training script is aligned to a Linux plus NVIDIA workflow and is intended to run on a CUDA-enabled machine such as an RTX 3060 environment.
 
 ## Repository Structure
 
 ```text
 .
-├── scripts/
-│   ├── curate_dataset.py
-│   ├── generate_gold_standard.py
-│   └── train_qlora.py
-└── README.md
+|-- scripts/
+|   |-- curate_dataset.py
+|   |-- generate_gold_standard.py
+|   `-- train_qlora.py
+|-- Fin-Instruct_details.txt
+|-- Finly_details.txt
+`-- README.md
 ```
 
 ## Data Schema
@@ -117,7 +120,22 @@ python scripts/curate_dataset.py \
   --output-jsonl data/curated_dataset.jsonl
 ```
 
-### 5. Generate Gold-Standard Outputs
+### 5. Curate Dataset From SEC Filings
+
+```bash
+python scripts/curate_dataset.py \
+  --sec-company "AAPL:320193" \
+  --sec-company "MSFT:789019" \
+  --sec-user-agent "Fin-Instruct research your-email@example.com" \
+  --sec-form 10-K \
+  --sec-form 10-Q \
+  --sec-filings-per-company 2 \
+  --output-jsonl data/curated_dataset.jsonl
+```
+
+This path pulls recent SEC filing documents directly from EDGAR and stores metadata such as ticker, CIK, form type, and filing date alongside each record.
+
+### 6. Generate Gold-Standard Outputs
 
 ```bash
 python scripts/generate_gold_standard.py \
@@ -136,7 +154,7 @@ python scripts/generate_gold_standard.py \
   --limit 25
 ```
 
-### 6. Train LoRA Adapter
+### 7. Train LoRA Adapter
 
 ```bash
 python scripts/train_qlora.py \
@@ -146,9 +164,9 @@ python scripts/train_qlora.py \
 
 ## Current Implementation Notes
 
-- `scripts/curate_dataset.py` supports online ingestion and local fallback input.
+- `scripts/curate_dataset.py` supports local text, RSS feeds, article URLs, and direct SEC filing ingestion.
 - `scripts/generate_gold_standard.py` uses the current OpenAI client flow and supports retrying plus resumable output generation.
-- `scripts/train_qlora.py` is aligned to a Linux + NVIDIA training path instead of DirectML.
+- `scripts/train_qlora.py` is aligned to a Linux plus NVIDIA training path instead of DirectML.
 - The project is currently in the dataset and training-foundation stage, not yet deployment-ready.
 
 ## Quality Standards
@@ -164,17 +182,16 @@ Manual spot-checking of randomly sampled records is a required part of the workf
 
 ## Roadmap
 
-- modernize the gold-standard generation script and improve retry/resume behavior
-- add source-specific collectors for high-value financial datasets
-- introduce train/validation splitting and lightweight evaluation
+- expand source-specific collectors for high-value financial datasets
+- introduce train and validation splitting plus lightweight evaluation
 - package the resulting adapter for downstream inference
 - add RAG-based retrieval with current market context
 - build a deployable demo interface
 
 ## Environment Direction
 
-The intended training environment is Linux with NVIDIA CUDA support.
+The intended training environment is Linux with NVIDIA CUDA support. This repository is being prepared locally, while model fine-tuning is expected to run on a separate lab machine with an NVIDIA GPU.
 
 ## Security Note
 
-For other contributors or anyone that wants to use this repo, do not commit live API credentials into the repository. Store secrets in environment variables or local-only configuration and rotate any exposed keys immediately.
+Do not commit live API credentials into the repository. Store secrets in environment variables or local-only configuration and rotate any exposed keys immediately.
