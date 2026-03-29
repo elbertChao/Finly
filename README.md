@@ -1,4 +1,4 @@
-# Fin-Instruct
+# Finly
 
 An LLM fine-tuned specifically to ingest dense financial texts to output highly structured, beginner-friendly insights focusing on long-term growth and hold strategies for stocks & investments.
 
