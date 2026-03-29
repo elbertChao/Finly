@@ -126,6 +126,16 @@ python scripts/generate_gold_standard.py \
   --model gpt-4.1
 ```
 
+For smaller validation runs, annotate only part of the dataset first:
+
+```bash
+python scripts/generate_gold_standard.py \
+  --input-jsonl data/curated_dataset.jsonl \
+  --output-jsonl data/curated_dataset_annotated.jsonl \
+  --model gpt-4.1 \
+  --limit 25
+```
+
 ### 6. Train LoRA Adapter
 
 ```bash
@@ -137,7 +147,7 @@ python scripts/train_qlora.py \
 ## Current Implementation Notes
 
 - `scripts/curate_dataset.py` supports online ingestion and local fallback input.
-- `scripts/generate_gold_standard.py` is present and functional, but still due for modernization and stronger fault tolerance.
+- `scripts/generate_gold_standard.py` uses the current OpenAI client flow and supports retrying plus resumable output generation.
 - `scripts/train_qlora.py` is aligned to a Linux + NVIDIA training path instead of DirectML.
 - The project is currently in the dataset and training-foundation stage, not yet deployment-ready.
 
