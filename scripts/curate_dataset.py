@@ -85,33 +85,50 @@ def collapse_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def normalize_multiline_text(text: str) -> str:
+    paragraphs = [collapse_whitespace(paragraph) for paragraph in re.split(r"\n\s*\n", text)]
+    paragraphs = [paragraph for paragraph in paragraphs if paragraph]
+    return "\n\n".join(paragraphs)
+
+
 def strip_html(html: str) -> str:
+    paragraph_break = "\n\n[[PARA]]\n\n"
+    line_break = "\n"
+
     text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html)
-    text = re.sub(r"(?i)</?(div|p|tr|td|th|li|section|article|h[1-6]|br)\b[^>]*>", "\n", text)
-    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
-    text = re.sub(r"(?i)</p\s*>", "\n", text)
+    text = re.sub(r"(?i)<br\s*/?>", line_break, text)
+    text = re.sub(r"(?i)</?(p|div|section|article|li|ul|ol|h[1-6])\b[^>]*>", paragraph_break, text)
+    text = re.sub(r"(?i)</?(tr)\b[^>]*>", paragraph_break, text)
+    text = re.sub(r"(?i)</?(td|th)\b[^>]*>", " ", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
     text = unescape(text)
-    lines = [collapse_whitespace(line) for line in text.splitlines()]
-    lines = [line for line in lines if line]
-    return "\n\n".join(lines)
+
+    paragraphs = []
+    for raw_paragraph in text.split("[[PARA]]"):
+        cleaned_lines = [collapse_whitespace(line) for line in raw_paragraph.splitlines()]
+        cleaned_lines = [line for line in cleaned_lines if line]
+        cleaned_paragraph = collapse_whitespace(" ".join(cleaned_lines))
+        if cleaned_paragraph:
+            paragraphs.append(cleaned_paragraph)
+
+    return "\n\n".join(paragraphs)
 
 
 def clean_sec_text(text: str) -> str:
-    text = re.sub(r"https?://fasb\.org/[^\s]+", " ", text)
-    text = re.sub(r"\b(?:us-gaap|xbrli|iso4217|dei|aapl):[A-Za-z0-9:._-]+\b", " ", text)
-    text = re.sub(r"\b\d{10}\b", " ", text)
-    text = re.sub(r"\bP\d+[A-Z]?\b", " ", text)
-    text = re.sub(r"[ \t]+", " ", text)
-
     cleaned_lines = []
-    for raw_line in text.splitlines():
-        line = collapse_whitespace(raw_line)
-        if not line:
+    for raw_paragraph in split_paragraphs(text):
+        paragraph = re.sub(r"https?://fasb\.org/[^\s]+", " ", raw_paragraph)
+        paragraph = re.sub(r"\b(?:us-gaap|xbrli|iso4217|dei|aapl):[A-Za-z0-9:._-]+\b", " ", paragraph)
+        paragraph = re.sub(r"\b\d{10}\b", " ", paragraph)
+        paragraph = re.sub(r"\bP\d+[A-Z]?\b", " ", paragraph)
+        paragraph = re.sub(r"[ \t]+", " ", paragraph)
+        paragraph = collapse_whitespace(paragraph)
+
+        if not paragraph:
             continue
-        if re.fullmatch(r"[\d\s\-\.,()/%:]{8,}", line):
+        if re.fullmatch(r"[\d\s\-\.,()/%:]{8,}", paragraph):
             continue
-        cleaned_lines.append(line)
+        cleaned_lines.append(paragraph)
 
     return "\n\n".join(cleaned_lines)
 
@@ -149,7 +166,38 @@ def limit_words(text: str, max_words: int) -> str:
 
 
 def split_paragraphs(text: str) -> list[str]:
-    return [paragraph.strip() for paragraph in re.split(r"\n\s*\n", text) if paragraph.strip()]
+    paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", text) if paragraph.strip()]
+    if len(paragraphs) > 1:
+        return paragraphs
+
+    single_block = collapse_whitespace(text)
+    if not single_block:
+        return []
+
+    sentences = re.split(r"(?<=[\.\?!])\s+(?=[A-Z0-9\"“])", single_block)
+    sentences = [sentence.strip() for sentence in sentences if sentence.strip()]
+    if len(sentences) <= 1:
+        return [single_block]
+
+    grouped = []
+    current = []
+    current_words = 0
+    target_words = 130
+
+    for sentence in sentences:
+        sentence_words = len(sentence.split())
+        if current and current_words + sentence_words > target_words:
+            grouped.append(" ".join(current))
+            current = []
+            current_words = 0
+
+        current.append(sentence)
+        current_words += sentence_words
+
+    if current:
+        grouped.append(" ".join(current))
+
+    return grouped
 
 
 def score_sec_paragraph(paragraph: str) -> int:
@@ -260,7 +308,7 @@ def normalize_cik(cik: str) -> str:
 
 
 def build_sample(raw_text: str, source: str, title: str = "", extra_metadata: dict | None = None) -> dict | None:
-    normalized = collapse_whitespace(raw_text)
+    normalized = normalize_multiline_text(raw_text)
     if not normalized:
         return None
 
