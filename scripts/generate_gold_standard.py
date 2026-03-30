@@ -194,7 +194,7 @@ def main():
     )
     parser.add_argument("--input-jsonl", default="data/curated_dataset.jsonl")
     parser.add_argument("--output-jsonl", default="data/curated_dataset_annotated.jsonl")
-    parser.add_argument("--model", default="gpt-4.1", help="OpenAI model name")
+    parser.add_argument("--model", default="gpt-4.1-mini", help="OpenAI model name")
     parser.add_argument("--max-output-tokens", type=int, default=900)
     parser.add_argument("--max-retries", type=int, default=4)
     parser.add_argument("--limit", type=int, default=None, help="Annotate only the first N records")

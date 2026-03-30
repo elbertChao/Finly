@@ -182,11 +182,13 @@ This path pulls recent SEC filing documents directly from EDGAR, extracts narrat
 
 ### 6. Generate Gold-Standard Outputs
 
+Note: gpt-4.1-mini is used to save API Key costs to create a project, but in reality 4.1 or better should be used
+
 ```bash
 python scripts/generate_gold_standard.py \
   --input-jsonl data/curated_dataset.jsonl \
   --output-jsonl data/curated_dataset_annotated.jsonl \
-  --model gpt-4.1
+  --model gpt-4.1-mini
 ```
 
 For smaller validation runs, annotate only part of the dataset first:
@@ -195,7 +197,7 @@ For smaller validation runs, annotate only part of the dataset first:
 python scripts/generate_gold_standard.py \
   --input-jsonl data/curated_dataset.jsonl \
   --output-jsonl data/curated_dataset_annotated.jsonl \
-  --model gpt-4.1 \
+  --model gpt-4.1-mini \
   --limit 25
 ```
 
