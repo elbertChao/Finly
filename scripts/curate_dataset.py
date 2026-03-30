@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import re
+from datetime import date
 from html import unescape
 from pathlib import Path
 from typing import Iterable
@@ -19,6 +20,16 @@ DEFAULT_INSTRUCTION = (
 DEFAULT_USER_AGENT = "Fin-Instruct/0.1 (dataset research bot; educational use)"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 SEC_ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik_nolead}/{accession_nodash}/{primary_doc}"
+SEC_SECTION_PATTERNS = {
+    "10-K": [
+        (r"Item\s+7\.\s+Management['’]s\s+Discussion\s+and\s+Analysis", r"Item\s+7A\."),
+        (r"Item\s+1\.\s+Business", r"Item\s+1A\."),
+    ],
+    "10-Q": [
+        (r"Item\s+2\.\s+Management['’]s\s+Discussion\s+and\s+Analysis", r"Item\s+3\."),
+        (r"Item\s+1\.\s+Financial\s+Statements", r"Item\s+2\."),
+    ],
+}
 
 
 def fetch_url(url: str, timeout: int = 20) -> str:
@@ -53,10 +64,69 @@ def collapse_whitespace(text: str) -> str:
 
 def strip_html(html: str) -> str:
     text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html)
+    text = re.sub(r"(?i)</?(div|p|tr|td|th|li|section|article|h[1-6]|br)\b[^>]*>", "\n", text)
     text = re.sub(r"(?i)<br\s*/?>", "\n", text)
     text = re.sub(r"(?i)</p\s*>", "\n", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
-    return collapse_whitespace(unescape(text))
+    text = unescape(text)
+    lines = [collapse_whitespace(line) for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    return "\n\n".join(lines)
+
+
+def clean_sec_text(text: str) -> str:
+    text = re.sub(r"https?://fasb\.org/[^\s]+", " ", text)
+    text = re.sub(r"\b(?:us-gaap|xbrli|iso4217|dei|aapl):[A-Za-z0-9:._-]+\b", " ", text)
+    text = re.sub(r"\b\d{10}\b", " ", text)
+    text = re.sub(r"\bP\d+[A-Z]?\b", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+
+    cleaned_lines = []
+    for raw_line in text.splitlines():
+        line = collapse_whitespace(raw_line)
+        if not line:
+            continue
+        if re.fullmatch(r"[\d\s\-\.,()/%:]{8,}", line):
+            continue
+        cleaned_lines.append(line)
+
+    return "\n\n".join(cleaned_lines)
+
+
+def extract_sec_section(text: str, form: str) -> str:
+    patterns = SEC_SECTION_PATTERNS.get(form, [])
+    for start_pattern, end_pattern in patterns:
+        start_matches = list(re.finditer(start_pattern, text, flags=re.IGNORECASE))
+        if not start_matches:
+            continue
+
+        best_candidate = ""
+        for start_match in start_matches:
+            trailing_text = text[start_match.end():]
+            end_match = re.search(end_pattern, trailing_text, flags=re.IGNORECASE)
+            if end_match:
+                candidate = text[start_match.start(): start_match.end() + end_match.start()]
+            else:
+                candidate = text[start_match.start():]
+
+            if len(candidate) > len(best_candidate):
+                best_candidate = candidate
+
+        if best_candidate:
+            return best_candidate
+
+    return text
+
+
+def limit_words(text: str, max_words: int) -> str:
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return " ".join(words[:max_words])
+
+
+def parse_iso_date(value: str) -> date:
+    return date.fromisoformat(value)
 
 
 def extract_title(html: str) -> str:
@@ -214,8 +284,12 @@ def fetch_sec_samples(
     user_agent: str,
     forms: set[str],
     filings_per_company: int,
+    max_words: int,
+    min_filing_date: str | None,
+    min_extracted_words: int,
 ) -> list[dict]:
     samples = []
+    min_date = parse_iso_date(min_filing_date) if min_filing_date else None
 
     for company in companies:
         ticker = company["ticker"]
@@ -232,9 +306,19 @@ def fetch_sec_samples(
         recent_dates = recent.get("filingDate", [])
 
         matched = 0
-        for form, accession, primary_doc, filing_date in zip(
-            recent_forms, recent_accessions, recent_primary_docs, recent_dates
-        ):
+        candidate_rows = list(
+            zip(
+                recent_forms,
+                recent_accessions,
+                recent_primary_docs,
+                recent_dates,
+            )
+        )
+        candidate_rows.sort(key=lambda row: row[3], reverse=True)
+
+        for form, accession, primary_doc, filing_date in candidate_rows:
+            if min_date and parse_iso_date(filing_date) < min_date:
+                continue
             if form not in forms:
                 continue
 
@@ -244,6 +328,16 @@ def fetch_sec_samples(
             filing_text = extract_article_text(html, min_paragraph_chars=80)
             if len(filing_text) < 500:
                 filing_text = strip_html(html)
+
+            filing_text = clean_sec_text(filing_text)
+            filing_text = extract_sec_section(filing_text, form=form)
+            filing_text = limit_words(filing_text, max_words=max_words)
+            if len(filing_text.split()) < min_extracted_words:
+                print(
+                    f"Skipping {ticker} {form} filed {filing_date}: extracted section too short "
+                    f"({len(filing_text.split())} words)"
+                )
+                continue
 
             sample = build_sample(
                 raw_text=filing_text,
@@ -257,6 +351,7 @@ def fetch_sec_samples(
                     "form": form,
                     "filing_date": filing_date,
                     "accession_number": accession,
+                    "truncated_to_words": max_words,
                 },
             )
             if sample:
@@ -331,7 +426,7 @@ def main():
     parser.add_argument(
         "--sec-form",
         action="append",
-        default=["10-K", "10-Q"],
+        default=[],
         help="SEC filing form to include. Repeat for multiple forms.",
     )
     parser.add_argument(
@@ -339,6 +434,23 @@ def main():
         type=int,
         default=2,
         help="Maximum number of recent SEC filings to ingest per company.",
+    )
+    parser.add_argument(
+        "--sec-max-words",
+        type=int,
+        default=1800,
+        help="Maximum number of words to keep from each SEC filing after narrative section extraction.",
+    )
+    parser.add_argument(
+        "--sec-min-filing-date",
+        default="",
+        help="Optional minimum SEC filing date in YYYY-MM-DD format to avoid stale filings.",
+    )
+    parser.add_argument(
+        "--sec-min-extracted-words",
+        type=int,
+        default=250,
+        help="Minimum acceptable extracted SEC section length before a filing is skipped.",
     )
 
     args = parser.parse_args()
@@ -364,12 +476,16 @@ def main():
                 "--sec-user-agent is required when using SEC ingestion so requests identify the project responsibly."
             )
         companies = parse_sec_company_specs(args.sec_company)
+        sec_forms = set(args.sec_form) if args.sec_form else {"10-K", "10-Q"}
         samples.extend(
             fetch_sec_samples(
                 companies=companies,
                 user_agent=args.sec_user_agent.strip(),
-                forms=set(args.sec_form),
+                forms=sec_forms,
                 filings_per_company=args.sec_filings_per_company,
+                max_words=args.sec_max_words,
+                min_filing_date=args.sec_min_filing_date.strip() or None,
+                min_extracted_words=args.sec_min_extracted_words,
             )
         )
 
