@@ -30,6 +30,29 @@ SEC_SECTION_PATTERNS = {
         (r"Item\s+1\.\s+Financial\s+Statements", r"Item\s+2\."),
     ],
 }
+SEC_FINANCE_KEYWORDS = [
+    "revenue",
+    "sales",
+    "growth",
+    "margin",
+    "gross margin",
+    "operating income",
+    "operating expenses",
+    "cash",
+    "liquidity",
+    "capital",
+    "segments",
+    "services",
+    "cloud",
+    "advertising",
+    "guidance",
+    "demand",
+    "risk",
+    "tariff",
+    "competition",
+    "profit",
+    "income taxes",
+]
 
 
 def fetch_url(url: str, timeout: int = 20) -> str:
@@ -123,6 +146,80 @@ def limit_words(text: str, max_words: int) -> str:
     if len(words) <= max_words:
         return text
     return " ".join(words[:max_words])
+
+
+def split_paragraphs(text: str) -> list[str]:
+    return [paragraph.strip() for paragraph in re.split(r"\n\s*\n", text) if paragraph.strip()]
+
+
+def score_sec_paragraph(paragraph: str) -> int:
+    lowered = paragraph.lower()
+    return sum(lowered.count(keyword) for keyword in SEC_FINANCE_KEYWORDS)
+
+
+def build_ranked_chunks(
+    text: str,
+    chunk_words: int,
+    chunk_overlap_words: int,
+    max_chunks: int,
+) -> list[dict]:
+    paragraphs = split_paragraphs(text)
+    if not paragraphs:
+        return []
+
+    chunks = []
+    current_paragraphs = []
+    current_words = 0
+    start_index = 0
+
+    for index, paragraph in enumerate(paragraphs):
+        paragraph_words = len(paragraph.split())
+        if paragraph_words > chunk_words:
+            paragraph = limit_words(paragraph, chunk_words)
+            paragraph_words = len(paragraph.split())
+
+        if current_paragraphs and current_words + paragraph_words > chunk_words:
+            chunk_text = "\n\n".join(current_paragraphs)
+            chunks.append(
+                {
+                    "text": chunk_text,
+                    "score": sum(score_sec_paragraph(p) for p in current_paragraphs),
+                    "start_paragraph": start_index,
+                    "end_paragraph": index - 1,
+                }
+            )
+
+            overlap_paragraphs = []
+            overlap_words = 0
+            for existing in reversed(current_paragraphs):
+                existing_words = len(existing.split())
+                if overlap_words + existing_words > chunk_overlap_words:
+                    break
+                overlap_paragraphs.insert(0, existing)
+                overlap_words += existing_words
+
+            current_paragraphs = overlap_paragraphs[:]
+            current_words = sum(len(item.split()) for item in current_paragraphs)
+            start_index = index - len(current_paragraphs)
+
+        if not current_paragraphs:
+            start_index = index
+
+        current_paragraphs.append(paragraph)
+        current_words += paragraph_words
+
+    if current_paragraphs:
+        chunks.append(
+            {
+                "text": "\n\n".join(current_paragraphs),
+                "score": sum(score_sec_paragraph(p) for p in current_paragraphs),
+                "start_paragraph": start_index,
+                "end_paragraph": len(paragraphs) - 1,
+            }
+        )
+
+    chunks.sort(key=lambda item: (item["score"], len(item["text"].split())), reverse=True)
+    return chunks[:max_chunks]
 
 
 def parse_iso_date(value: str) -> date:
@@ -287,6 +384,9 @@ def fetch_sec_samples(
     max_words: int,
     min_filing_date: str | None,
     min_extracted_words: int,
+    chunk_words: int,
+    chunk_overlap_words: int,
+    max_chunks_per_filing: int,
 ) -> list[dict]:
     samples = []
     min_date = parse_iso_date(min_filing_date) if min_filing_date else None
@@ -339,24 +439,42 @@ def fetch_sec_samples(
                 )
                 continue
 
-            sample = build_sample(
-                raw_text=filing_text,
-                source=filing_url,
-                title=title,
-                extra_metadata={
-                    "source_type": "sec_filing",
-                    "ticker": ticker,
-                    "company_name": company_name,
-                    "cik": cik,
-                    "form": form,
-                    "filing_date": filing_date,
-                    "accession_number": accession,
-                    "truncated_to_words": max_words,
-                },
+            ranked_chunks = build_ranked_chunks(
+                text=filing_text,
+                chunk_words=chunk_words,
+                chunk_overlap_words=chunk_overlap_words,
+                max_chunks=max_chunks_per_filing,
             )
-            if sample:
-                samples.append(sample)
-                matched += 1
+            if not ranked_chunks:
+                continue
+
+            for chunk_index, chunk in enumerate(ranked_chunks):
+                if len(chunk["text"].split()) < min_extracted_words:
+                    continue
+
+                sample = build_sample(
+                    raw_text=chunk["text"],
+                    source=filing_url,
+                    title=title,
+                    extra_metadata={
+                        "source_type": "sec_filing",
+                        "ticker": ticker,
+                        "company_name": company_name,
+                        "cik": cik,
+                        "form": form,
+                        "filing_date": filing_date,
+                        "accession_number": accession,
+                        "truncated_to_words": max_words,
+                        "chunk_index": chunk_index,
+                        "chunk_score": chunk["score"],
+                        "chunk_start_paragraph": chunk["start_paragraph"],
+                        "chunk_end_paragraph": chunk["end_paragraph"],
+                    },
+                )
+                if sample:
+                    samples.append(sample)
+
+            matched += 1
 
             if matched >= filings_per_company:
                 break
@@ -452,6 +570,24 @@ def main():
         default=250,
         help="Minimum acceptable extracted SEC section length before a filing is skipped.",
     )
+    parser.add_argument(
+        "--sec-chunk-words",
+        type=int,
+        default=900,
+        help="Target words per SEC chunk after section extraction.",
+    )
+    parser.add_argument(
+        "--sec-chunk-overlap-words",
+        type=int,
+        default=120,
+        help="Approximate word overlap between neighboring SEC chunks.",
+    )
+    parser.add_argument(
+        "--sec-max-chunks-per-filing",
+        type=int,
+        default=2,
+        help="Maximum number of ranked SEC chunks to keep from each filing.",
+    )
 
     args = parser.parse_args()
 
@@ -486,6 +622,9 @@ def main():
                 max_words=args.sec_max_words,
                 min_filing_date=args.sec_min_filing_date.strip() or None,
                 min_extracted_words=args.sec_min_extracted_words,
+                chunk_words=args.sec_chunk_words,
+                chunk_overlap_words=args.sec_chunk_overlap_words,
+                max_chunks_per_filing=args.sec_max_chunks_per_filing,
             )
         )
 

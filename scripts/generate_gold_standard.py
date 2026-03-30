@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from openai import OpenAI
+from dotenv import load_dotenv
 
 
 SYSTEM_PROMPT = """
@@ -42,7 +43,8 @@ SOURCE TEXT:
 
 
 def load_client() -> OpenAI:
-    api_key = os.getenv("OPENAI_API_KEY")
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env", override=True)
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY must be set in the environment.")
     return OpenAI(api_key=api_key)

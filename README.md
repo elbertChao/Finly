@@ -173,10 +173,12 @@ python scripts/curate_dataset.py \
   --sec-form 10-K \
   --sec-form 10-Q \
   --sec-filings-per-company 2 \
+  --sec-chunk-words 900 \
+  --sec-max-chunks-per-filing 2 \
   --output-jsonl data/curated_dataset.jsonl
 ```
 
-This path pulls recent SEC filing documents directly from EDGAR and stores metadata such as ticker, CIK, form type, and filing date alongside each record.
+This path pulls recent SEC filing documents directly from EDGAR, extracts narrative sections such as MD&A, ranks the more financially relevant subsections, and stores chunk-level metadata such as ticker, CIK, form type, filing date, and chunk index alongside each record.
 
 ### 6. Generate Gold-Standard Outputs
 
@@ -256,6 +258,7 @@ python scripts/train_qlora.py \
 ## Current Implementation Notes
 
 - `scripts/curate_dataset.py` supports local text, RSS feeds, article URLs, and direct SEC filing ingestion.
+- `scripts/curate_dataset.py` can chunk SEC narrative sections into smaller ranked training examples instead of taking only one long filing slice.
 - `scripts/generate_gold_standard.py` uses the current OpenAI client flow and supports retrying plus resumable output generation.
 - `scripts/validate_dataset.py` checks dataset structure, empty responses, section headings, and rough length limits before annotation or training.
 - `scripts/split_dataset.py` creates reproducible train and validation splits from an annotated dataset.
