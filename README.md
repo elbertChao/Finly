@@ -237,7 +237,8 @@ python scripts/evaluate_dataset.py \
 
 ```bash
 python scripts/train_qlora.py \
-  --dataset-path data/train.jsonl \
+  --train-dataset-path data/train.jsonl \
+  --validation-dataset-path data/validation.jsonl \
   --output-dir artifacts/finly-lora
 ```
 
@@ -245,7 +246,8 @@ If GPU memory is tighter than expected, try shorter sequence lengths or disable 
 
 ```bash
 python scripts/train_qlora.py \
-  --dataset-path data/train.jsonl \
+  --train-dataset-path data/train.jsonl \
+  --validation-dataset-path data/validation.jsonl \
   --output-dir artifacts/finly-lora \
   --max-seq-length 768 \
   --no-4bit
@@ -258,7 +260,7 @@ python scripts/train_qlora.py \
 - `scripts/validate_dataset.py` checks dataset structure, empty responses, section headings, and rough length limits before annotation or training.
 - `scripts/split_dataset.py` creates reproducible train and validation splits from an annotated dataset.
 - `scripts/evaluate_dataset.py` provides lightweight reporting on dataset size, length distribution, source mix, and section coverage.
-- `scripts/train_qlora.py` is aligned to a Linux plus NVIDIA training path instead of DirectML.
+- `scripts/train_qlora.py` is aligned to a Linux plus NVIDIA training path and can evaluate against a validation split each epoch.
 - `requirements.txt` captures the Python package dependencies, while PyTorch should be installed separately to match the CUDA environment on the target system.
 - The project is currently in the dataset and training-foundation stage, not yet deployment-ready.
 
